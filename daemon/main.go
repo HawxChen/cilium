@@ -35,6 +35,7 @@ import (
 	"github.com/cilium/cilium/daemon/options"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/version"
 
@@ -62,22 +63,23 @@ var (
 	log    = logging.MustGetLogger("cilium")
 
 	// Arguments variables keep in alphabetical order
+	bpfRoot            string
 	consulAddr         string
 	disableConntrack   bool
 	enablePolicy       bool
 	enableTracing      bool
 	enableLogstash     bool
 	etcdAddr           []string
+	kvStore            string
 	k8sLabels          []string
 	validLabels        []string
 	labelPrefixFile    string
 	logstashAddr       string
 	logstashProbeTimer uint32
+	nat46prefix        string
 	socketPath         string
 	v4Prefix           string
 	v6Address          string
-	nat46prefix        string
-	bpfRoot            string
 )
 
 var cfgFile string
@@ -232,6 +234,7 @@ func init() {
 	flags.StringVar(&config.K8sCfgPath, "k8s-kubeconfig-path", "", "Absolute path to the kubeconfig file")
 	flags.StringSliceVar(&k8sLabels, "k8s-prefix", []string{},
 		"Key values that will be read from kubernetes. (Default: k8s-app, version)")
+	flags.StringVar(&kvStore, "kvstore", kvstore.Local, "Key-value store type")
 	flags.BoolVar(&config.KeepConfig, "keep-config", false,
 		"When restoring state, keeps containers' configuration in place")
 	flags.StringVar(&labelPrefixFile, "label-prefix-file", "", "File with valid label prefixes")
@@ -434,21 +437,32 @@ func initEnv() {
 }
 
 func runDaemon() {
-	if consulAddr != "" {
-		consulDefaultAPI := consulAPI.DefaultConfig()
-		consulSplitAddr := strings.Split(consulAddr, "://")
-		if len(consulSplitAddr) == 2 {
-			consulAddr = consulSplitAddr[1]
-		} else if len(consulSplitAddr) == 1 {
-			consulAddr = consulSplitAddr[0]
+	switch kvStore {
+	case kvstore.Consul:
+		if consulAddr != "" {
+			consulDefaultAPI := consulAPI.DefaultConfig()
+			consulSplitAddr := strings.Split(consulAddr, "://")
+			if len(consulSplitAddr) == 2 {
+				consulAddr = consulSplitAddr[1]
+			} else if len(consulSplitAddr) == 1 {
+				consulAddr = consulSplitAddr[0]
+			}
+			consulDefaultAPI.Address = consulAddr
+			config.ConsulConfig = consulDefaultAPI
 		}
-		consulDefaultAPI.Address = consulAddr
-		config.ConsulConfig = consulDefaultAPI
+	case kvstore.Etcd:
+		if len(etcdAddr) != 0 && config.EtcdCfgPath == "" {
+			config.EtcdConfig = &etcdAPI.Config{}
+			config.EtcdConfig.Endpoints = etcdAddr
+		}
+	case kvstore.Local:
+		log.Infof("Using local storage for key-value store")
+	default:
+		log.Fatalf("unsupported key-value store \"%s\" provided", kvStore)
+		return
 	}
-	if len(etcdAddr) != 0 && config.EtcdCfgPath == "" {
-		config.EtcdConfig = &etcdAPI.Config{}
-		config.EtcdConfig.Endpoints = etcdAddr
-	}
+
+	config.KVStore = kvStore
 
 	d, err := NewDaemon(config)
 	if err != nil {
